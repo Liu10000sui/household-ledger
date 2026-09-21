@@ -51,7 +51,7 @@
     -webkit-background-clip:text;background-clip:text;color:transparent;
   }
   h1 .emo{-webkit-text-fill-color:initial;color:initial;}
-  .file-actions{display:flex;gap:8px;}
+  .file-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
 
   /* ── 카드 ── */
   .card{
@@ -132,6 +132,7 @@
     box-shadow:0 10px 22px -12px rgba(139,47,232,.9);transition:transform .15s, box-shadow .15s, filter .15s;
   }
   .btn:hover{transform:translateY(-2px);filter:brightness(1.06);}
+  .btn:disabled{opacity:.6;cursor:not-allowed;transform:none;}
   .btn.secondary{
     background:#fff;color:var(--purple-dk);border:1.5px solid #e6dcfb;box-shadow:none;font-weight:700;
   }
@@ -219,6 +220,8 @@
     color:#b3145e;padding:8px 12px;border-radius:12px;font-size:13px;font-weight:700;margin-bottom:12px;flex-wrap:wrap;
   }
 
+  #loadingScreen{max-width:1040px;margin:0 auto;text-align:center;padding-top:120px;color:var(--muted);font-weight:700;font-size:14px;}
+
   @media (max-width:640px){
     body{padding:16px 12px 40px;}
     .card,.hero{padding:16px;border-radius:18px;}
@@ -236,11 +239,10 @@
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="warning-banner" id="storageWarning">
-    이 브라우저 환경에서는 자동 저장이 되지 않습니다. 작업 내용은 "JSON 내보내기"로 꼭 백업해 주세요.
-  </div>
 
+<div id="loadingScreen">불러오는 중...</div>
+
+<div class="wrap" id="appScreen" style="display:none;">
   <div class="top-actions">
     <h1><span class="emo">💸</span> 리우님의 가계부</h1>
     <div class="file-actions">
@@ -357,9 +359,13 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (function(){
-  var STORAGE_KEY = 'ggb_transactions_v1';
+  var SUPABASE_URL = 'https://lqmnkhnuosmnydwfoqdy.supabase.co';
+  var SUPABASE_KEY = 'sb_publishable_j6ZoyQ-C34pdcEkI94OtiA_LrIWsVq4';
+  var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
   var CATEGORIES = {
     income: ['급여','용돈','상여','이자/배당','기타수입'],
     expense: ['식비','교통비','주거/관리비','통신비','의료/건강','문화/여가','교육','쇼핑','경조사','기타지출']
@@ -373,34 +379,8 @@
     selectedDate: null
   };
 
-  var storageOk = true;
-  function loadData(){
-    try{
-      var raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
-    }catch(e){
-      storageOk = false;
-      return [];
-    }
-  }
-  function saveData(list){
-    try{
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-    }catch(e){
-      storageOk = false;
-    }
-    if(!storageOk){
-      document.getElementById('storageWarning').style.display = 'block';
-    }
-  }
-  var data = loadData();
-  if(!storageOk){
-    document.getElementById('storageWarning').style.display = 'block';
-  }
+  var data = [];
 
-  function uid(){
-    return Date.now().toString(36) + Math.random().toString(36).slice(2,8);
-  }
   function fmtMoney(n){
     return Number(n).toLocaleString('ko-KR') + '원';
   }
@@ -422,6 +402,29 @@
   function todayStr(){
     var n = new Date();
     return n.getFullYear()+'-'+pad2(n.getMonth()+1)+'-'+pad2(n.getDate());
+  }
+  function toRow(r){
+    return { id:r.id, date:r.date, type:r.type, category:r.category, memo:r.memo, amount:Number(r.amount) };
+  }
+
+  /* ── 화면 전환 ── */
+  var loadingScreen = document.getElementById('loadingScreen');
+  var appScreen = document.getElementById('appScreen');
+  function showScreen(name){
+    loadingScreen.style.display = name === 'loading' ? 'block' : 'none';
+    appScreen.style.display = name === 'app' ? 'block' : 'none';
+  }
+
+  async function fetchTransactions(){
+    var res = await sb.from('transactions').select('*')
+      .order('date', { ascending: false })
+      .order('created_at', { ascending: false });
+    if(res.error){
+      alert('데이터를 불러오지 못했습니다: ' + res.error.message);
+      data = [];
+      return;
+    }
+    data = (res.data || []).map(toRow);
   }
 
   var typeToggleEl = document.querySelector('.type-toggle');
@@ -467,35 +470,46 @@
 
   cancelEditBtn.addEventListener('click', resetForm);
 
-  form.addEventListener('submit', function(e){
+  form.addEventListener('submit', async function(e){
     e.preventDefault();
     var amount = Number(amountInput.value);
     if(!dateInput.value || !amount || amount <= 0){
       alert('날짜와 올바른 금액을 입력해 주세요.');
       return;
     }
-    if(state.editingId){
-      var item = data.find(function(d){ return d.id === state.editingId; });
-      if(item){
-        item.date = dateInput.value;
-        item.type = state.currentType;
-        item.category = categorySelect.value;
-        item.memo = memoInput.value.trim();
-        item.amount = amount;
+    submitBtn.disabled = true;
+    try{
+      if(state.editingId){
+        var payload = {
+          date: dateInput.value,
+          type: state.currentType,
+          category: categorySelect.value,
+          memo: memoInput.value.trim(),
+          amount: amount
+        };
+        var res = await sb.from('transactions').update(payload).eq('id', state.editingId).select();
+        if(res.error) throw res.error;
+        var idx = data.findIndex(function(d){ return d.id === state.editingId; });
+        if(idx !== -1 && res.data && res.data[0]) data[idx] = toRow(res.data[0]);
+      } else {
+        var payload = {
+          date: dateInput.value,
+          type: state.currentType,
+          category: categorySelect.value,
+          memo: memoInput.value.trim(),
+          amount: amount
+        };
+        var res = await sb.from('transactions').insert([payload]).select();
+        if(res.error) throw res.error;
+        if(res.data && res.data[0]) data.push(toRow(res.data[0]));
       }
-    } else {
-      data.push({
-        id: uid(),
-        date: dateInput.value,
-        type: state.currentType,
-        category: categorySelect.value,
-        memo: memoInput.value.trim(),
-        amount: amount
-      });
+      resetForm();
+      render();
+    }catch(err){
+      alert('저장 중 오류가 발생했습니다: ' + err.message);
+    }finally{
+      submitBtn.disabled = false;
     }
-    saveData(data);
-    resetForm();
-    render();
   });
 
   function startEdit(id){
@@ -517,10 +531,11 @@
     window.scrollTo({top:0, behavior:'smooth'});
   }
 
-  function deleteItem(id){
+  async function deleteItem(id){
     if(!confirm('이 내역을 삭제할까요?')) return;
+    var res = await sb.from('transactions').delete().eq('id', id);
+    if(res.error){ alert('삭제 중 오류가 발생했습니다: ' + res.error.message); return; }
     data = data.filter(function(d){ return d.id !== id; });
-    saveData(data);
     if(state.editingId === id) resetForm();
     render();
   }
@@ -808,30 +823,54 @@
     var file = e.target.files[0];
     if(!file) return;
     var reader = new FileReader();
-    reader.onload = function(evt){
+    reader.onload = async function(evt){
       try{
         var imported = JSON.parse(evt.target.result);
         if(!Array.isArray(imported)) throw new Error('invalid');
-        var mode = confirm('기존 데이터에 추가하려면 확인, 전체 교체하려면 취소를 누르세요.');
-        if(mode){
-          data = data.concat(imported);
-        } else {
-          data = imported;
+        var rows = imported.filter(function(d){
+          return d && d.date && (d.type === 'income' || d.type === 'expense') && d.category && Number(d.amount) > 0;
+        }).map(function(d){
+          return {
+            date: d.date,
+            type: d.type,
+            category: d.category,
+            memo: (d.memo || '').toString(),
+            amount: Number(d.amount)
+          };
+        });
+        if(!rows.length) throw new Error('empty');
+        var replaceAll = !confirm('기존 데이터에 추가하려면 확인, 전체 교체하려면 취소를 누르세요.');
+        importFile.disabled = true;
+        if(replaceAll){
+          var delRes = await sb.from('transactions').delete().not('id', 'is', null);
+          if(delRes.error) throw delRes.error;
         }
-        saveData(data);
+        var insRes = await sb.from('transactions').insert(rows).select();
+        if(insRes.error) throw insRes.error;
+        var newItems = (insRes.data || []).map(toRow);
+        data = replaceAll ? newItems : data.concat(newItems);
         render();
         alert('불러오기가 완료되었습니다.');
       }catch(err){
-        alert('올바른 백업 파일이 아닙니다.');
+        alert('올바른 백업 파일이 아니거나 오류가 발생했습니다: ' + (err && err.message ? err.message : ''));
+      }finally{
+        importFile.value = '';
+        importFile.disabled = false;
       }
-      importFile.value = '';
     };
     reader.readAsText(file);
   });
 
-  dateInput.value = todayStr();
-  refreshCategoryOptions();
-  render();
+  async function init(){
+    showScreen('loading');
+    await fetchTransactions();
+    dateInput.value = state.selectedDate || todayStr();
+    refreshCategoryOptions();
+    render();
+    showScreen('app');
+  }
+
+  init();
 })();
 </script>
 </body>
